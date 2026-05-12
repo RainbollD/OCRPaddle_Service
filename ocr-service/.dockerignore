@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Tests & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Git
+.git/
+.gitignore
+
+# Docs
+README.md
+*.md
+
+# Sample files
+sample_client.py
+tests/
+
+# Temporary / local uploads
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+
+# Docker artifacts
+docker-compose*.yml
