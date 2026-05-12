@@ -1,0 +1,52 @@
+services:
+  ocr-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ocr-service:latest
+    container_name: ocr-service
+    restart: unless-stopped
+
+    ports:
+      - "6666:6666"
+
+    environment:
+      OCR_LANG: "ru"
+      OCR_DEVICE: "gpu:0"
+      MAX_UPLOAD_MB: "50"
+      PDF_DPI: "200"
+      PADDLE_PDX_MODEL_SOURCE: "BOS"
+
+    volumes:
+      # Persist downloaded PaddleOCR / PaddleX models between container restarts
+      - paddleocr-cache:/root/.paddlex
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    command:
+      - python3
+      - -m
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "6666"
+      - --workers
+      - "1"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6666/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  paddleocr-cache:
