@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
-from paddleocr import PaddleOCR
+from paddleocr import PaddleOCR, PPStructureV3
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,6 @@ _ocr_lock = asyncio.Lock()
 def _create_ocr_instance() -> Any:
     """Instantiate PaddleOCR with project-configured models."""
 
-
     os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", settings.paddle_pdx_model_source)
 
     logger.info(
@@ -26,8 +25,31 @@ def _create_ocr_instance() -> Any:
         settings.ocr_lang,
         settings.ocr_device,
     )
-
     return PaddleOCR(
+        text_detection_model_name=settings.text_detection_model,
+        text_recognition_model_name=settings.text_recognition_model,
+        lang=settings.ocr_lang,
+        device=settings.ocr_device,
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=False,
+    )
+
+
+def _create_structured_ocr_instance() -> Any:
+    """Instantiate PPStructureV3 with project-configured models."""
+
+    os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", settings.paddle_pdx_model_source)
+
+    logger.info(
+        "Initialising PPStructureV3: det=%s rec=%s lang=%s device=%s",
+        settings.text_detection_model,
+        settings.text_recognition_model,
+        settings.ocr_lang,
+        settings.ocr_device,
+    )
+
+    return PPStructureV3(
         text_detection_model_name=settings.text_detection_model,
         text_recognition_model_name=settings.text_recognition_model,
         lang=settings.ocr_lang,
@@ -53,6 +75,14 @@ def init_ocr() -> None:
         logger.info("PaddleOCR engine ready.")
 
 
+def init_structured_ocr() -> None:
+    """Called once at application startup to warm up the model."""
+    global _ocr_instance
+    if _ocr_instance is None:
+        _ocr_instance = _create_structured_ocr_instance()
+        logger.info("PaddleStructuredOCR engine ready.")
+
+
 def _as_mapping(item: Any) -> dict[str, Any] | None:
     if isinstance(item, dict):
         return item
@@ -71,7 +101,57 @@ def _as_mapping(item: Any) -> dict[str, Any] | None:
     return None
 
 
+def _lines_from_text(text: Any) -> list[str]:
+    if not isinstance(text, str):
+        return []
+
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _extract_markdown_lines(item: Any) -> list[str]:
+    markdown = (
+        item.get("markdown") if isinstance(item, dict) else getattr(item, "markdown", None)
+    )
+    if callable(markdown):
+        try:
+            markdown = markdown()
+        except TypeError:
+            markdown = None
+
+    if not isinstance(markdown, dict):
+        return []
+
+    # Python PPStructureV3 exposes "markdown_texts"; service-style responses use "text".
+    return _lines_from_text(markdown.get("markdown_texts") or markdown.get("text"))
+
+
+def _extract_rec_texts(mapping: dict[str, Any]) -> list[str]:
+    rec_texts = mapping.get("rec_texts")
+    if isinstance(rec_texts, list):
+        return [str(text).strip() for text in rec_texts if str(text).strip()]
+
+    return []
+
+
+def _extract_parsing_blocks(mapping: dict[str, Any]) -> list[str]:
+    blocks = mapping.get("parsing_res_list")
+    if not isinstance(blocks, list):
+        return []
+
+    lines: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        lines.extend(_lines_from_text(block.get("block_content")))
+
+    return lines
+
+
 def _extract_from_mapping(item: Any) -> list[str]:
+    markdown_lines = _extract_markdown_lines(item)
+    if markdown_lines:
+        return markdown_lines
+
     mapping = _as_mapping(item)
     if mapping is None:
         return []
@@ -80,9 +160,20 @@ def _extract_from_mapping(item: Any) -> list[str]:
     if isinstance(nested, dict):
         mapping = nested
 
-    rec_texts = mapping.get("rec_texts")
-    if isinstance(rec_texts, list):
-        return [str(text).strip() for text in rec_texts if str(text).strip()]
+    parsing_lines = _extract_parsing_blocks(mapping)
+    if parsing_lines:
+        return parsing_lines
+
+    for nested_key in ("overall_ocr_res", "text_paragraphs_ocr_res"):
+        nested_result = mapping.get(nested_key)
+        if isinstance(nested_result, dict):
+            rec_lines = _extract_rec_texts(nested_result)
+            if rec_lines:
+                return rec_lines
+
+    rec_lines = _extract_rec_texts(mapping)
+    if rec_lines:
+        return rec_lines
 
     line_text = mapping.get("transcription") or mapping.get("text")
     if line_text and str(line_text).strip():

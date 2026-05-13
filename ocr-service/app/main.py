@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 
 from app.config import settings
-from app.ocr_engine import init_ocr, run_ocr_on_file
+from app.ocr_engine import init_ocr, run_ocr_on_file, init_structured_ocr
 from app.pdf_utils import pdf_to_images
 from app.schemas import (
     BatchImageResult,
@@ -36,7 +36,7 @@ ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting up — initialising OCR engine...")
-    init_ocr()
+    init_structured_ocr()
     yield
     logger.info("Shutting down OCR service.")
 
