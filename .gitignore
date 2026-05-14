@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Environment files (may contain secrets)
+.env
+.env.*
+!.env.example
+
+# Test artefacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local test images / scratch files
+test_png/
+working_preproccessing_pictures
+
+# OS
+.DS_Store
+Thumbs.db
