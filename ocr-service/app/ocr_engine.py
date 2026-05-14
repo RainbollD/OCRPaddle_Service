@@ -9,7 +9,6 @@ from typing import Any
 from app.config import settings
 from app.increasing_image_quality import improve_image_for_ocr
 from app.schemas import ContentBlock, TableBlock, TableCell, TableRow
-from paddleocr import PPStructureV3
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +33,9 @@ def _clear_device_cache() -> None:
 
 def _create_structured_ocr_instance(device: str) -> Any:
     """Instantiate PPStructureV3 with project-configured models."""
+    # Imported here so that merely importing ocr_engine does not load PaddleOCR.
+    # This keeps the /health endpoint and unit tests free of GPU dependencies.
+    from paddleocr import PPStructureV3  # noqa: PLC0415
 
     os.environ.setdefault("PADDLE_PDX_MODEL_SOURCE", settings.paddle_pdx_model_source)
 
@@ -88,11 +90,6 @@ def get_structured_ocr() -> Any:
     if _structured_ocr_instance is None:
         raise RuntimeError("Structured OCR engine has not been initialised yet.")
     return _structured_ocr_instance
-
-
-def init_structured_ocr() -> None:
-    """Called once at application startup to warm up the PPStructureV3 model."""
-    _ensure_structured_ocr_loaded()
 
 
 def _as_mapping(item: Any) -> dict[str, Any] | None:
@@ -421,6 +418,7 @@ def extract_structured_content(ocr_result: Any) -> tuple[list[ContentBlock], str
         full_markdown: Full markdown document string (tables as Markdown tables).
     """
     blocks: list[ContentBlock] = []
+    markdown_parts: list[str] = []
 
     if not ocr_result:
         logger.warning("PPStructureV3 returned an empty result object: %r", ocr_result)
@@ -447,10 +445,13 @@ def extract_structured_content(ocr_result: Any) -> tuple[list[ContentBlock], str
             text = "\n".join(text_lines)
             if text:
                 blocks.append(ContentBlock(type="text", text=text, table=None))
-            full_text = "\n".join(b.text for b in blocks if b.text)
-            if not blocks and not full_text and not engine_markdown:
-                _log_empty_structured_result(ocr_result)
-            return blocks, full_text, engine_markdown or full_text
+            if engine_markdown:
+                markdown_parts.append(engine_markdown)
+            elif text:
+                markdown_parts.append(text)
+            continue
+
+        item_block_start = len(blocks)
 
         for raw_block in parsing_list:
             block_mapping = _block_as_mapping(raw_block)
@@ -483,26 +484,25 @@ def extract_structured_content(ocr_result: Any) -> tuple[list[ContentBlock], str
                 if text or block_label == "figure":
                     blocks.append(ContentBlock(type=block_label, text=text, table=None))  # type: ignore[arg-type]
 
-        full_text = "\n".join(b.text for b in blocks if b.text)
-
         # Prefer the engine-rendered markdown; fall back to assembling it from blocks.
-        if not engine_markdown:
-            md_parts: list[str] = []
-            for b in blocks:
+        if engine_markdown:
+            markdown_parts.append(engine_markdown)
+        else:
+            item_md: list[str] = []
+            for b in blocks[item_block_start:]:
                 if b.type == "table" and b.table:
-                    md_parts.append(b.table.markdown)
+                    item_md.append(b.table.markdown)
                 elif b.text:
-                    md_parts.append(b.text)
-            engine_markdown = "\n\n".join(md_parts)
-
-        if not blocks and not full_text and not engine_markdown:
-            _log_empty_structured_result(ocr_result)
-        return blocks, full_text, engine_markdown
+                    item_md.append(b.text)
+            if item_md:
+                markdown_parts.append("\n\n".join(item_md))
 
     full_text = "\n".join(b.text for b in blocks if b.text)
-    if not blocks and not full_text:
+    full_markdown = "\n\n".join(markdown_parts) if markdown_parts else full_text
+
+    if not blocks and not full_text and not full_markdown:
         _log_empty_structured_result(ocr_result)
-    return blocks, full_text, full_text
+    return blocks, full_text, full_markdown
 
 
 async def run_structured_ocr_on_file(
@@ -517,6 +517,7 @@ async def run_structured_ocr_on_file(
         full_markdown: Markdown document with tables rendered as Markdown tables.
 
     The asyncio lock guarantees sequential GPU access — no concurrent inference.
+    Inference runs in a thread pool so the event loop stays responsive.
     """
     try:
         ocr_input_path = await improve_image_for_ocr(image_path)
@@ -528,7 +529,9 @@ async def run_structured_ocr_on_file(
         ocr = _ensure_structured_ocr_loaded(device)
         logger.debug("Running structured OCR on %s with device=%s", ocr_input_path, device)
         try:
-            result = ocr.predict(input=str(ocr_input_path))
+            result = await asyncio.to_thread(
+                lambda: ocr.predict(input=str(ocr_input_path))
+            )
         except Exception as exc:
             logger.exception("Structured OCR inference failed on %s", ocr_input_path)
             raise RuntimeError(f"Structured OCR internal error: {exc}") from exc

@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import os
+import re
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -25,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/bmp"}
 ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-ALLOWED_OCR_DEVICES = {"cpu", "gpu:0"}
+
+# Accepts "cpu", "gpu:0", "gpu:1", … — any non-negative integer index.
+_GPU_DEVICE_RE = re.compile(r"^gpu:\d+$")
+
+_UPLOAD_CHUNK = 256 * 1024  # 256 KB per read chunk
 
 
 # ---------------------------------------------------------------------------
@@ -56,7 +62,8 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 
 def _validate_upload_size(file: UploadFile) -> None:
-    if file.size and file.size > settings.max_upload_bytes:
+    """Early-exit if the Content-Length header already reveals an oversized file."""
+    if file.size is not None and file.size > settings.max_upload_bytes:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=(
@@ -78,44 +85,72 @@ def _validate_image_extension(filename: str) -> None:
         )
 
 
+def _validate_image_content_type(file: UploadFile) -> None:
+    """Validate the MIME type declared in the multipart header."""
+    ct = (file.content_type or "").lower().split(";")[0].strip()
+    if ct and ct not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=(
+                f"Unsupported content type '{ct}'. "
+                f"Allowed: {', '.join(sorted(ALLOWED_IMAGE_TYPES))}"
+            ),
+        )
+
+
 def _resolve_ocr_device(device: str | None) -> str:
     if device is None or not device.strip():
         return settings.ocr_device
 
     normalized = device.strip().lower()
-    if normalized not in ALLOWED_OCR_DEVICES:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Unsupported OCR device '{device}'. "
-                f"Allowed: {', '.join(sorted(ALLOWED_OCR_DEVICES))}"
-            ),
-        )
+    if normalized == "cpu" or _GPU_DEVICE_RE.match(normalized):
+        return normalized
 
-    return normalized
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=(
+            f"Unsupported OCR device '{device}'. "
+            "Allowed values: 'cpu', 'gpu:0', 'gpu:1', …"
+        ),
+    )
 
 
 async def _save_upload_to_tmp(file: UploadFile, suffix: str) -> Path:
-    """Persist the uploaded SpooledTemporaryFile to a real on-disk temp file."""
-    data = await file.read()
-    if not data:
+    """Stream the uploaded file to a real on-disk temp file.
+
+    Enforces the size limit incrementally so the server never holds the
+    entire payload in RAM before deciding to reject it.
+    """
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp_path = Path(tmp.name)
+    written = 0
+    try:
+        while chunk := await file.read(_UPLOAD_CHUNK):
+            written += len(chunk)
+            if written > settings.max_upload_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=(
+                        f"File '{file.filename}' exceeds the maximum allowed size "
+                        f"of {settings.max_upload_mb} MB."
+                    ),
+                )
+            tmp.write(chunk)
+        tmp.flush()
+    except Exception:
+        tmp.close()
+        _remove_file(tmp_path)
+        raise
+    else:
+        tmp.close()
+
+    if written == 0:
+        _remove_file(tmp_path)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Uploaded file '{file.filename}' is empty.",
         )
-    if len(data) > settings.max_upload_bytes:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=(
-                f"File '{file.filename}' exceeds the maximum allowed size "
-                f"of {settings.max_upload_mb} MB."
-            ),
-        )
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(data)
-    tmp.flush()
-    tmp.close()
-    return Path(tmp.name)
+    return tmp_path
 
 
 def _remove_file(path: Path) -> None:
@@ -143,6 +178,7 @@ async def ocr_image_structured(
     _validate_upload_size(file)
     filename = file.filename or "unknown"
     _validate_image_extension(filename)
+    _validate_image_content_type(file)
     ocr_device = _resolve_ocr_device(device)
 
     ext = Path(filename).suffix.lower()
@@ -200,7 +236,14 @@ async def ocr_pdf_structured(
         t0 = time.perf_counter()
 
         try:
-            page_image_paths = pdf_to_images(tmp_pdf)
+            page_image_paths = await asyncio.to_thread(
+                pdf_to_images, tmp_pdf, None, settings.max_pdf_pages
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
         except Exception as exc:
             logger.exception("PDF rendering failed for %s", filename)
             raise HTTPException(
@@ -250,4 +293,3 @@ async def ocr_pdf_structured(
         _remove_file(tmp_pdf)
         for p in page_image_paths:
             _remove_file(p)
-

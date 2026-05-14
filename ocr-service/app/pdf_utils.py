@@ -9,11 +9,22 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-def pdf_to_images(pdf_path: Path, dpi: int | None = None) -> list[Path]:
+def pdf_to_images(
+    pdf_path: Path,
+    dpi: int | None = None,
+    max_pages: int | None = None,
+) -> list[Path]:
     """Render every page of *pdf_path* to a PNG file.
 
-    Returns an ordered list of temporary PNG paths.
-    The caller is responsible for deleting these files.
+    Args:
+        pdf_path:  Path to the source PDF.
+        dpi:       Render resolution; defaults to ``settings.pdf_dpi``.
+        max_pages: If set, raises ``ValueError`` when the document exceeds
+                   this many pages before any rendering takes place.
+
+    Returns:
+        An ordered list of temporary PNG paths.
+        The caller is responsible for deleting these files.
     """
     dpi = dpi or settings.pdf_dpi
     zoom = dpi / 72.0
@@ -23,7 +34,13 @@ def pdf_to_images(pdf_path: Path, dpi: int | None = None) -> list[Path]:
     doc = fitz.open(str(pdf_path))
 
     try:
-        for page_index in range(len(doc)):
+        total_pages = len(doc)
+        if max_pages is not None and total_pages > max_pages:
+            raise ValueError(
+                f"PDF has {total_pages} pages; maximum allowed is {max_pages}."
+            )
+
+        for page_index in range(total_pages):
             page = doc.load_page(page_index)
 
             rect = page.rect

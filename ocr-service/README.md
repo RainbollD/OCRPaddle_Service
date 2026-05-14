@@ -18,12 +18,13 @@ ocr-service/
 │   ├── schemas.py       # Pydantic response models
 │   └── config.py        # Settings from environment variables
 ├── tests/
-│   └── test_health.py
+│   ├── test_health.py
+│   └── test_ocr_engine.py
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
+├── requirements-dev.txt
 ├── .dockerignore
-├── sample_client.py     # CLI helper for manual testing
 └── README.md
 ```
 
@@ -104,7 +105,7 @@ curl -X POST "http://localhost:6666/ocr/image/structured" \
      -F "device=cpu"
 ```
 
-Allowed `device` values: `cpu`, `gpu:0`. If `device` is omitted, the service uses `OCR_DEVICE` from the environment.
+Allowed `device` values: `cpu`, `gpu:0`, `gpu:1`, … (any non-negative GPU index). If `device` is omitted, the service uses `OCR_DEVICE` from the environment.
 
 Response:
 ```json
@@ -166,7 +167,7 @@ Response:
 
 ---
 
-## Sample Python client
+## Quick curl examples
 
 ```bash
 # Structured image
@@ -178,7 +179,7 @@ curl -X POST "http://localhost:6666/ocr/image/structured" -F "file=@page.png" -F
 # Structured PDF
 curl -X POST "http://localhost:6666/ocr/document/structured" -F "file=@document.pdf"
 
-# Structured PDF on GPU
+# Structured PDF on a specific GPU
 curl -X POST "http://localhost:6666/ocr/document/structured" -F "file=@document.pdf" -F "device=gpu:0"
 ```
 
@@ -191,7 +192,8 @@ curl -X POST "http://localhost:6666/ocr/document/structured" -F "file=@document.
 | `OCR_LANG` | `ru` | OCR language |
 | `OCR_DEVICE` | `gpu:0` | PaddlePaddle device string |
 | `MAX_UPLOAD_MB` | `50` | Maximum upload size in megabytes |
-| `PDF_DPI` | `200` | Resolution for PDF → image rendering |
+| `PDF_DPI` | `200` | Resolution for PDF → image rendering (higher = better quality, more RAM) |
+| `MAX_PDF_PAGES` | `100` | Maximum number of pages accepted per PDF upload |
 | `PADDLE_PDX_MODEL_SOURCE` | `BOS` | Model download source (`BOS` = official bucket) |
 
 All variables can be overridden in `docker-compose.yml` under `environment:` or via a `.env` file placed next to `docker-compose.yml`.
@@ -201,16 +203,18 @@ All variables can be overridden in `docker-compose.yml` under `environment:` or 
 ## Running tests locally
 
 ```bash
-# Full project dependencies
-pip install -r requirements.txt
+# Full dev install (includes pytest + httpx)
+pip install -r requirements-dev.txt
 pytest tests/ -v
 
-# Or a minimal test-only install without PaddleOCR/GPU packages
+# Minimal install — no PaddleOCR/GPU packages required
 pip install fastapi python-multipart pydantic-settings pytest httpx
 pytest tests/ -v
 ```
 
-> The health tests do not load OCR models, so no GPU is required for `/health`.
+> PaddleOCR is imported lazily (only when the first OCR request arrives), so
+> the health-endpoint tests and the `ocr_engine` unit tests run without a GPU
+> or a working Paddle installation.
 
 ---
 
