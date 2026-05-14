@@ -5,18 +5,16 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 
 from app.config import settings
-from app.ocr_engine import init_ocr, run_ocr_on_file, init_structured_ocr
+from app.ocr_engine import run_structured_ocr_on_file
 from app.pdf_utils import pdf_to_images
 from app.schemas import (
-    BatchImageResult,
-    BatchOCRResponse,
     HealthResponse,
-    ImageOCRResponse,
-    PDFOCRResponse,
-    PageResult,
+    StructuredImageOCRResponse,
+    StructuredPageResult,
+    StructuredPDFOCRResponse,
 )
 
 logging.basicConfig(
@@ -27,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/bmp"}
 ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+ALLOWED_OCR_DEVICES = {"cpu", "gpu:0"}
 
 
 # ---------------------------------------------------------------------------
@@ -35,8 +34,7 @@ ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting up — initialising OCR engine...")
-    init_structured_ocr()
+    logger.info("Starting up OCR service. OCR engines will be loaded on demand.")
     yield
     logger.info("Shutting down OCR service.")
 
@@ -47,7 +45,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="OCR Service",
-    description="Local OCR API backed by PaddleOCR (PaddleX v3).",
+    description="Local structured OCR API backed by PPStructureV3.",
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -78,6 +76,23 @@ def _validate_image_extension(filename: str) -> None:
                 f"Allowed: {', '.join(sorted(ALLOWED_IMAGE_EXTENSIONS))}"
             ),
         )
+
+
+def _resolve_ocr_device(device: str | None) -> str:
+    if device is None or not device.strip():
+        return settings.ocr_device
+
+    normalized = device.strip().lower()
+    if normalized not in ALLOWED_OCR_DEVICES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Unsupported OCR device '{device}'. "
+                f"Allowed: {', '.join(sorted(ALLOWED_OCR_DEVICES))}"
+            ),
+        )
+
+    return normalized
 
 
 async def _save_upload_to_tmp(file: UploadFile, suffix: str) -> Path:
@@ -119,28 +134,38 @@ async def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-@app.post("/ocr/image", response_model=ImageOCRResponse, tags=["OCR"])
-async def ocr_image(file: UploadFile = File(...)) -> ImageOCRResponse:
+@app.post("/ocr/image/structured", response_model=StructuredImageOCRResponse, tags=["OCR"])
+async def ocr_image_structured(
+    file: UploadFile = File(...),
+    device: str | None = Form(default=None),
+) -> StructuredImageOCRResponse:
+    """Extract text and tables from an image with layout understanding (PPStructureV3)."""
     _validate_upload_size(file)
     filename = file.filename or "unknown"
     _validate_image_extension(filename)
+    ocr_device = _resolve_ocr_device(device)
 
     ext = Path(filename).suffix.lower()
     tmp_path = await _save_upload_to_tmp(file, suffix=ext)
 
     try:
         t0 = time.perf_counter()
-        lines, text = await run_ocr_on_file(tmp_path)
+        blocks, full_text, full_markdown = await run_structured_ocr_on_file(
+            tmp_path,
+            device=ocr_device,
+        )
         elapsed = time.perf_counter() - t0
 
+        table_count = sum(1 for b in blocks if b.type == "table")
         logger.info(
-            "image | file=%s ext=%s lines=%d time=%.3fs",
-            filename, ext, len(lines), elapsed,
+            "image/structured | file=%s ext=%s device=%s blocks=%d tables=%d time=%.3fs",
+            filename, ext, ocr_device, len(blocks), table_count, elapsed,
         )
-        return ImageOCRResponse(
+        return StructuredImageOCRResponse(
             filename=filename,
-            text=text,
-            lines=lines,
+            blocks=blocks,
+            text=full_text,
+            markdown=full_markdown,
             language=settings.ocr_lang,
         )
     except RuntimeError as exc:
@@ -152,10 +177,15 @@ async def ocr_image(file: UploadFile = File(...)) -> ImageOCRResponse:
         _remove_file(tmp_path)
 
 
-@app.post("/ocr/document", response_model=PDFOCRResponse, tags=["OCR"])
-async def ocr_pdf(file: UploadFile = File(...)) -> PDFOCRResponse:
+@app.post("/ocr/document/structured", response_model=StructuredPDFOCRResponse, tags=["OCR"])
+async def ocr_pdf_structured(
+    file: UploadFile = File(...),
+    device: str | None = Form(default=None),
+) -> StructuredPDFOCRResponse:
+    """Extract text and tables from a PDF with layout understanding (PPStructureV3)."""
     _validate_upload_size(file)
     filename = file.filename or "unknown"
+    ocr_device = _resolve_ocr_device(device)
 
     if not filename.lower().endswith(".pdf"):
         raise HTTPException(
@@ -164,7 +194,6 @@ async def ocr_pdf(file: UploadFile = File(...)) -> PDFOCRResponse:
         )
 
     tmp_pdf = await _save_upload_to_tmp(file, suffix=".pdf")
-
     page_image_paths: list[Path] = []
 
     try:
@@ -179,105 +208,46 @@ async def ocr_pdf(file: UploadFile = File(...)) -> PDFOCRResponse:
                 detail=f"Failed to render PDF: {exc}",
             ) from exc
 
-        page_results: list[PageResult] = []
+        page_results: list[StructuredPageResult] = []
         for idx, img_path in enumerate(page_image_paths, start=1):
             try:
-                lines, text = await run_ocr_on_file(img_path)
+                blocks, page_text, page_markdown = await run_structured_ocr_on_file(
+                    img_path,
+                    device=ocr_device,
+                )
             except RuntimeError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"OCR failed on page {idx}: {exc}",
+                    detail=f"Structured OCR failed on page {idx}: {exc}",
                 ) from exc
-            page_results.append(PageResult(page=idx, text=text, lines=lines))
+            page_results.append(
+                StructuredPageResult(
+                    page=idx,
+                    blocks=blocks,
+                    text=page_text,
+                    markdown=page_markdown,
+                )
+            )
 
         full_text = "\n\n".join(p.text for p in page_results)
-        total_lines = sum(len(p.lines) for p in page_results)
+        full_markdown = "\n\n---\n\n".join(p.markdown for p in page_results)
         elapsed = time.perf_counter() - t0
 
-        logger.info(
-            "pdf | file=%s pages=%d lines=%d time=%.3fs",
-            filename, len(page_results), total_lines, elapsed,
+        total_tables = sum(
+            sum(1 for b in p.blocks if b.type == "table") for p in page_results
         )
-        return PDFOCRResponse(
+        logger.info(
+            "document/structured | file=%s device=%s pages=%d tables=%d time=%.3fs",
+            filename, ocr_device, len(page_results), total_tables, elapsed,
+        )
+        return StructuredPDFOCRResponse(
             filename=filename,
             pages=page_results,
             full_text=full_text,
+            full_markdown=full_markdown,
         )
     finally:
         _remove_file(tmp_pdf)
         for p in page_image_paths:
             _remove_file(p)
 
-
-@app.post("/ocr/batch", response_model=BatchOCRResponse, tags=["OCR"])
-async def ocr_batch(files: list[UploadFile] = File(...)) -> BatchOCRResponse:
-    results: list[BatchImageResult] = []
-
-    for file in files:
-        filename = file.filename or "unknown"
-        ext = Path(filename).suffix.lower()
-        # Per-file size check
-        if file.size and file.size > settings.max_upload_bytes:
-            results.append(
-                BatchImageResult(
-                    filename=filename,
-                    text="",
-                    lines=[],
-                    error=f"File exceeds {settings.max_upload_mb} MB limit.",
-                )
-            )
-            continue
-
-        if ext not in ALLOWED_IMAGE_EXTENSIONS:
-            results.append(
-                BatchImageResult(
-                    filename=filename,
-                    text="",
-                    lines=[],
-                    error=f"Unsupported extension '{ext}'.",
-                )
-            )
-            continue
-
-        try:
-            tmp_path = await _save_upload_to_tmp(file, suffix=ext)
-        except HTTPException as exc:
-            results.append(
-                BatchImageResult(
-                    filename=filename,
-                    text="",
-                    lines=[],
-                    error=str(exc.detail),
-                )
-            )
-            continue
-
-        try:
-            t0 = time.perf_counter()
-            lines, text = await run_ocr_on_file(tmp_path)
-            elapsed = time.perf_counter() - t0
-            logger.info(
-                "batch | file=%s ext=%s lines=%d time=%.3fs",
-                filename, ext, len(lines), elapsed,
-            )
-            results.append(
-                BatchImageResult(
-                    filename=filename,
-                    text=text,
-                    lines=lines,
-                    language=settings.ocr_lang,
-                )
-            )
-        except RuntimeError as exc:
-            results.append(
-                BatchImageResult(
-                    filename=filename,
-                    text="",
-                    lines=[],
-                    error=str(exc),
-                )
-            )
-        finally:
-            _remove_file(tmp_path)
-
-    return BatchOCRResponse(results=results)

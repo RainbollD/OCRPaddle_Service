@@ -1,6 +1,6 @@
 # OCR Service
 
-Local HTTP API for extracting text from images and PDF documents, powered by **PaddleOCR (PaddleX v3)** and served via **FastAPI**.
+Local HTTP API for extracting structured text and tables from images and PDF documents, powered by **PPStructureV3 (PaddleX v3)** and served via **FastAPI**.
 
 Optimised for **NVIDIA RTX 3050 8 GB** — uses the lightweight PP-OCRv5 *mobile* models to keep VRAM consumption low.
 
@@ -13,7 +13,7 @@ ocr-service/
 ├── app/
 │   ├── __init__.py
 │   ├── main.py          # FastAPI routes
-│   ├── ocr_engine.py    # PaddleOCR singleton + async GPU lock
+│   ├── ocr_engine.py    # PPStructureV3 singleton + async GPU lock
 │   ├── pdf_utils.py     # PyMuPDF PDF → PNG rendering
 │   ├── schemas.py       # Pydantic response models
 │   └── config.py        # Settings from environment variables
@@ -87,31 +87,68 @@ curl http://localhost:6666/health
 # {"status":"ok"}
 ```
 
-### `POST /ocr/image` — single image
+### `POST /ocr/image/structured` — single image with layout and tables
 
 Accepts: `png`, `jpg`, `jpeg`, `webp`, `bmp`
 
 ```bash
-curl -X POST "http://localhost:6666/ocr/image" \
+curl -X POST "http://localhost:6666/ocr/image/structured" \
      -F "file=@page.png"
 ```
+
+Run on CPU instead of GPU:
+
+```bash
+curl -X POST "http://localhost:6666/ocr/image/structured" \
+     -F "file=@page.png" \
+     -F "device=cpu"
+```
+
+Allowed `device` values: `cpu`, `gpu:0`. If `device` is omitted, the service uses `OCR_DEVICE` from the environment.
 
 Response:
 ```json
 {
   "filename": "page.png",
+  "blocks": [
+    {
+      "type": "text",
+      "text": "Распознанный текст...",
+      "table": null
+    },
+    {
+      "type": "table",
+      "text": "Колонка 1  Колонка 2\nЗначение 1  Значение 2",
+      "table": {
+        "rows": [
+          {"cells": [{"content": "Колонка 1"}, {"content": "Колонка 2"}]},
+          {"cells": [{"content": "Значение 1"}, {"content": "Значение 2"}]}
+        ],
+        "markdown": "| Колонка 1 | Колонка 2 |\n| --- | --- |\n| Значение 1 | Значение 2 |",
+        "html": "<table>...</table>"
+      }
+    }
+  ],
   "text": "Распознанный текст...",
-  "lines": ["Строка 1", "Строка 2"],
-  "engine": "paddleocr",
+  "markdown": "Распознанный текст...\n\n| Колонка 1 | Колонка 2 |\n| --- | --- |\n| Значение 1 | Значение 2 |",
+  "engine": "ppstructurev3",
   "language": "ru"
 }
 ```
 
-### `POST /ocr/pdf` — PDF document
+### `POST /ocr/document/structured` — PDF document with layout and tables
 
 ```bash
-curl -X POST "http://localhost:6666/ocr/pdf" \
+curl -X POST "http://localhost:6666/ocr/document/structured" \
      -F "file=@document.pdf"
+```
+
+Run PDF OCR on CPU:
+
+```bash
+curl -X POST "http://localhost:6666/ocr/document/structured" \
+     -F "file=@document.pdf" \
+     -F "device=cpu"
 ```
 
 Response:
@@ -119,29 +156,11 @@ Response:
 {
   "filename": "document.pdf",
   "pages": [
-    {"page": 1, "text": "...", "lines": ["..."]},
-    {"page": 2, "text": "...", "lines": ["..."]}
+    {"page": 1, "blocks": [...], "text": "...", "markdown": "..."},
+    {"page": 2, "blocks": [...], "text": "...", "markdown": "..."}
   ],
-  "full_text": "Объединённый текст всех страниц..."
-}
-```
-
-### `POST /ocr/batch` — multiple images
-
-```bash
-curl -X POST "http://localhost:6666/ocr/batch" \
-     -F "files=@img1.png" \
-     -F "files=@img2.jpg" \
-     -F "files=@img3.webp"
-```
-
-Response:
-```json
-{
-  "results": [
-    {"filename": "img1.png", "text": "...", "lines": [...], "engine": "paddleocr", "language": "ru", "error": null},
-    ...
-  ]
+  "full_text": "Объединённый текст всех страниц...",
+  "full_markdown": "Markdown всех страниц..."
 }
 ```
 
@@ -150,17 +169,17 @@ Response:
 ## Sample Python client
 
 ```bash
-# Single image
-python sample_client.py image page.png
+# Structured image
+curl -X POST "http://localhost:6666/ocr/image/structured" -F "file=@page.png"
 
-# PDF
-python sample_client.py pdf document.pdf
+# Structured image on CPU
+curl -X POST "http://localhost:6666/ocr/image/structured" -F "file=@page.png" -F "device=cpu"
 
-# Batch
-python sample_client.py batch img1.png img2.jpg
+# Structured PDF
+curl -X POST "http://localhost:6666/ocr/document/structured" -F "file=@document.pdf"
 
-# Custom URL
-python sample_client.py --url http://192.168.1.10:6666 image scan.png
+# Structured PDF on GPU
+curl -X POST "http://localhost:6666/ocr/document/structured" -F "file=@document.pdf" -F "device=gpu:0"
 ```
 
 ---
@@ -191,7 +210,7 @@ pip install fastapi python-multipart pydantic-settings pytest httpx
 pytest tests/ -v
 ```
 
-> The test suite mocks the OCR engine — no GPU or PaddleOCR installation is required for `/health`.
+> The health tests do not load OCR models, so no GPU is required for `/health`.
 
 ---
 
@@ -199,7 +218,7 @@ pytest tests/ -v
 
 | Concern | Decision |
 |---|---|
-| GPU VRAM (8 GB RTX 3050) | PP-OCRv5 *mobile* models (~100 MB combined); single uvicorn worker |
+| GPU VRAM (8 GB RTX 3050) | Structured OCR only; single PPStructureV3 instance and single uvicorn worker |
 | Concurrent GPU access | `asyncio.Lock` in `ocr_engine.py` — OCR calls are serialised |
 | Temporary files | `tempfile.NamedTemporaryFile`; deleted in `finally` blocks |
 | Model persistence | Docker named volume `paddleocr-cache` → `/root/.paddlex` |
