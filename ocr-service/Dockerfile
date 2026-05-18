@@ -24,7 +24,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpng-dev \
         libjpeg-dev \
         libopenblas-dev \
-        curl \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/bin/python
 
@@ -39,19 +38,20 @@ RUN python3 -m pip install --upgrade pip setuptools wheel && \
 
 COPY app/ ./app/
 
-# Download PaddleOCR/PaddleX model archives without importing paddlepaddle-gpu.
+# Copy PaddleOCR/PaddleX model archives from the local build context.
 # During docker build, NVIDIA driver libraries such as libcuda.so.1 are not
 # mounted into the build container, so instantiating PaddleOCR with the GPU
 # wheel fails even if device="cpu".
+COPY models/PP-OCRv3_mobile_det_infer.tar \
+     models/eslav_PP-OCRv5_mobile_rec_infer.tar \
+     /tmp/models/
+
 RUN set -eux; \
     MODEL_ROOT="/root/.paddlex/official_models"; \
-    BASE_URL="https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0"; \
     mkdir -p "${MODEL_ROOT}"; \
-    for MODEL in PP-OCRv5_mobile_det eslav_PP-OCRv5_mobile_rec; do \
+    for MODEL in PP-OCRv3_mobile_det eslav_PP-OCRv5_mobile_rec; do \
         mkdir -p "${MODEL_ROOT}/${MODEL}"; \
-        curl -fSL "${BASE_URL}/${MODEL}_infer.tar" -o "/tmp/${MODEL}_infer.tar"; \
-        tar -xf "/tmp/${MODEL}_infer.tar" -C "${MODEL_ROOT}/${MODEL}" --strip-components=1; \
-        rm -f "/tmp/${MODEL}_infer.tar"; \
+        tar -xf "/tmp/models/${MODEL}_infer.tar" -C "${MODEL_ROOT}/${MODEL}" --strip-components=1; \
     done
 
 RUN mkdir -p /opt/paddleocr-cache && \

@@ -12,9 +12,11 @@ Optimised for **NVIDIA RTX 3050 8 GB** — uses the lightweight PP-OCRv5 *mobile
 ocr-service/
 ├── app/
 │   ├── __init__.py
-│   ├── main.py          # FastAPI routes
+│   ├── main.py          # FastAPI app setup
+│   ├── routes.py        # API routes
 │   ├── ocr_engine.py    # PPStructureV3 singleton + async GPU lock
 │   ├── pdf_utils.py     # PyMuPDF PDF → PNG rendering
+│   ├── utils.py         # Upload validation and temp-file helpers
 │   ├── schemas.py       # Pydantic response models
 │   └── config.py        # Settings from environment variables
 ├── tests/
@@ -197,33 +199,3 @@ curl -X POST "http://localhost:6666/ocr/document/structured" -F "file=@document.
 | `PADDLE_PDX_MODEL_SOURCE` | `BOS` | Model download source (`BOS` = official bucket) |
 
 All variables can be overridden in `docker-compose.yml` under `environment:` or via a `.env` file placed next to `docker-compose.yml`.
-
----
-
-## Running tests locally
-
-```bash
-# Full dev install (includes pytest + httpx)
-pip install -r requirements-dev.txt
-pytest tests/ -v
-
-# Minimal install — no PaddleOCR/GPU packages required
-pip install fastapi python-multipart pydantic-settings pytest httpx
-pytest tests/ -v
-```
-
-> PaddleOCR is imported lazily (only when the first OCR request arrives), so
-> the health-endpoint tests and the `ocr_engine` unit tests run without a GPU
-> or a working Paddle installation.
-
----
-
-## Design decisions
-
-| Concern | Decision |
-|---|---|
-| GPU VRAM (8 GB RTX 3050) | Structured OCR only; single PPStructureV3 instance and single uvicorn worker |
-| Concurrent GPU access | `asyncio.Lock` in `ocr_engine.py` — OCR calls are serialised |
-| Temporary files | `tempfile.NamedTemporaryFile`; deleted in `finally` blocks |
-| Model persistence | Docker named volume `paddleocr-cache` → `/root/.paddlex` |
-| First-request latency | Models pre-downloaded during `docker build` |

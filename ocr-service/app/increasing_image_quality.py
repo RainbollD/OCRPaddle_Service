@@ -15,16 +15,17 @@ def increasing_image_quality(image_path: Path) -> Path:
 
     The service stores uploads and rendered PDF pages as temporary files. This
     helper adjusts image resolution with a high-quality Lanczos filter while
-    keeping the largest side comfortably below PaddleOCR's 4000px limit. Small images are
-    upscaled, oversized images are downscaled, and the same path is returned so
-    the OCR pipeline can keep working with the temporary file it already owns.
+    keeping the largest side comfortably below PaddleOCR's 4000px limit. Small
+    images are upscaled, oversized images are downscaled, and the same path is
+    returned so the OCR pipeline can keep working with the temporary file it
+    already owns.
 
     Args:
-        image_path: Path to an existing image file.
+        image_path (Path): Path to an existing image file.
 
     Returns:
-        The same path after the image has been rewritten with higher
-        resolution.
+        Path: The same path after the image has been rewritten with a better
+            OCR-friendly resolution.
 
     Raises:
         FileNotFoundError: If the provided image path does not exist.
@@ -58,10 +59,18 @@ def increasing_image_quality(image_path: Path) -> Path:
 async def improve_image_for_ocr(image_path: str | Path) -> Path:
     """Improve image quality for OCR without blocking the event loop.
 
+    The synchronous Pillow work is executed in a worker thread so the FastAPI
+    event loop can continue serving other requests.
+
     Args:
-        image_path: Path to an existing image file.
+        image_path (str | Path): Path to an existing image file.
 
     Returns:
-        The same path after OCR preprocessing has been applied.
+        Path: The same path after OCR preprocessing has been applied.
+
+    Raises:
+        FileNotFoundError: If the provided image path does not exist.
+        PIL.UnidentifiedImageError: If Pillow cannot identify the image file.
+        OSError: If the image cannot be read or written.
     """
     return await asyncio.to_thread(increasing_image_quality, Path(image_path))

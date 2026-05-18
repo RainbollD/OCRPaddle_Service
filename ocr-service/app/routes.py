@@ -18,7 +18,6 @@ from app.utils import (
     _remove_file,
     _resolve_ocr_device,
     _save_upload_to_tmp,
-    _validate_image_content_type,
     _validate_image_extension,
     _validate_upload_size,
 )
@@ -29,6 +28,14 @@ router = APIRouter()
 
 @router.get("/health", response_model=HealthResponse, tags=["Utility"])
 async def health() -> HealthResponse:
+    """Return a lightweight readiness response.
+
+    The handler does not touch PaddleOCR, so callers can use it to verify that
+    the HTTP service is alive without triggering model initialization.
+
+    Returns:
+        HealthResponse: JSON payload with the service status.
+    """
     return HealthResponse(status="ok")
 
 
@@ -41,11 +48,31 @@ async def ocr_image_structured(
     file: UploadFile = File(...),
     device: str | None = Form(default=None),
 ) -> StructuredImageOCRResponse:
-    """Extract text and tables from an image with layout understanding (PPStructureV3)."""
+    """Extract structured text and tables from an uploaded image.
+
+    The upload is validated, written to a temporary file, processed by
+    PPStructureV3, and removed after the request finishes.
+
+    Args:
+        file (UploadFile): Uploaded image file.
+        device (str | None, optional): Optional OCR device override such as
+            ``cpu`` or ``gpu:0``. Defaults to ``None``.
+
+    Returns:
+        StructuredImageOCRResponse: Structured OCR blocks, plain text, and
+            markdown for the uploaded image.
+
+    Raises:
+        HTTPException: Raised with HTTP 413 when the upload is too large.
+        HTTPException: Raised with HTTP 415 when the filename extension is not
+            supported.
+        HTTPException: Raised with HTTP 422 when the device value is invalid or
+            the upload is empty.
+        HTTPException: Raised with HTTP 500 when OCR processing fails.
+    """
     _validate_upload_size(file)
     filename = file.filename or "unknown"
     _validate_image_extension(filename)
-    _validate_image_content_type(file)
     ocr_device = _resolve_ocr_device(device)
 
     ext = Path(filename).suffix.lower()
@@ -89,7 +116,29 @@ async def ocr_pdf_structured(
     file: UploadFile = File(...),
     device: str | None = Form(default=None),
 ) -> StructuredPDFOCRResponse:
-    """Extract text and tables from a PDF with layout understanding (PPStructureV3)."""
+    """Extract structured text and tables from an uploaded PDF.
+
+    The PDF is rendered into temporary page images first. Each page image is
+    then processed with the same structured OCR pipeline used for images.
+
+    Args:
+        file (UploadFile): Uploaded PDF file.
+        device (str | None, optional): Optional OCR device override such as
+            ``cpu`` or ``gpu:0``. Defaults to ``None``.
+
+    Returns:
+        StructuredPDFOCRResponse: Per-page structured OCR results plus combined
+            plain text and markdown.
+
+    Raises:
+        HTTPException: Raised with HTTP 413 when the upload is too large.
+        HTTPException: Raised with HTTP 415 when the uploaded filename is not a
+            PDF.
+        HTTPException: Raised with HTTP 422 when PDF rendering fails, the PDF
+            exceeds the page limit, the device value is invalid, or the upload
+            is empty.
+        HTTPException: Raised with HTTP 500 when OCR processing fails on a page.
+    """
     _validate_upload_size(file)
     filename = file.filename or "unknown"
     ocr_device = _resolve_ocr_device(device)
