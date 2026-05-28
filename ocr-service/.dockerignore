@@ -34,7 +34,7 @@ htmlcov/
 .gitignore
 
 # Docs
-README.md
+../README.md
 *.md
 
 # Sample files
