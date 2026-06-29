@@ -1,201 +1,157 @@
-# OCR Service
+# OCR Comparison Stand
 
-Local HTTP API for extracting structured text and tables from images and PDF documents, powered by **PPStructureV3 (PaddleX v3)** and served via **FastAPI**.
+Стенд для сравнения OCR/VLM-моделей. На сервере поднимается контейнер-**гейтвей**, к которому
+идут API-запросы вида «модель + путь к файлу». Гейтвей подгружает нужную модель (один
+vLLM-бэкенд за раз — в 16 ГБ VRAM влезает одна модель), прогоняет картинку/PDF и **пишет
+`.md`-файл** с распознанным текстом на сервер. Режим `all` гоняет файл через все модели по очереди.
 
-Optimised for **NVIDIA RTX 3050 8 GB** — uses the lightweight PP-OCRv5 *mobile* models to keep VRAM consumption low.
+Документы в основном на русском, встречается английский — у всех трёх моделей кириллица в
+списке поддерживаемых языков.
 
----
-
-## Project layout
+## Архитектура
 
 ```
-ocr-service/
-├── app/
-│   ├── __init__.py
-│   ├── main.py          # FastAPI app setup
-│   ├── routes.py        # API routes
-│   ├── ocr_engine.py    # PPStructureV3 singleton + async GPU lock
-│   ├── pdf_utils.py     # PyMuPDF PDF → PNG rendering
-│   ├── utils.py         # Upload validation and temp-file helpers
-│   ├── schemas.py       # Pydantic response models
-│   └── config.py        # Settings from environment variables
-├── tests/
-│   ├── test_health.py
-│   └── test_ocr_engine.py
-├── Dockerfile
-├── docker-compose.yml
-├── requirements.txt
-├── requirements-dev.txt
-├── .dockerignore
-└── README.md
+client ──SSH-туннель──▶ gateway (FastAPI, :8080, CPU)
+                          │  docker.sock: start/stop бэкендов
+                          │  HTTP /v1/chat/completions
+                          ▼
+              один из vLLM-бэкендов (GPU, OpenAI API)
+   ┌───────────────┬──────────────┬──────────────────────┐
+   deepseek-ocr    hunyuan-ocr     qwen3-vl-8b
+   :8001           :8002           :8003
 ```
 
----
+| Модель | HF repo | Размер | Порт |
+|---|---|---|---|
+| `deepseek-ocr` | `deepseek-ai/DeepSeek-OCR` | ~6.7 ГБ BF16 | 8001 |
+| `hunyuan-ocr` | `tencent/HunyuanOCR` | ~2 ГБ | 8002 |
+| `qwen3-vl-8b` | `Qwen/Qwen3-VL-8B-Instruct-FP8` | ~9 ГБ FP8 | 8003 |
 
-## Quick start
+- **Вход:** файл лежит в `./data` (монтируется в гейтвей как `/data`), запрос передаёт путь
+  относительно этой папки. Поддержка изображений (`.png/.jpg/.jpeg/.webp/.bmp`) и `.pdf`
+  (рендерится постранично, md склеивается через `---`).
+- **Выход:** `./output/<модель>/<имя>.md`.
 
-### Prerequisites
+## Требования
 
-| Requirement | Notes |
+| Требование | Примечание |
 |---|---|
-| Docker ≥ 24 with Compose v2 | `docker compose version` |
-| [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) | `nvidia-ctk` must be on PATH |
-| NVIDIA driver ≥ 525 | `nvidia-smi` should show your GPU |
+| GPU NVIDIA, **16 ГБ VRAM** (RTX 5060 / Blackwell, sm_120) | держит одну модель за раз |
+| Драйвер NVIDIA + **CUDA 12.8+** | нужно для Blackwell-ядер vLLM |
+| Docker ≥ 24 + Compose v2 | `docker compose version` |
+| [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) | проброс GPU в контейнер |
+| (опц.) `HF_TOKEN` | если модель требует токен; экспортируется как env |
 
-### 1. Build the image
+> ⚠️ **Главный риск — тулчейн под Blackwell.** Бэкенды используют образ `vllm/vllm-openai:nightly`.
+> Сначала пройдите **smoke-тест железа** (ниже). Если vLLM не стартует под sm_120 — поменяйте тег
+> образа / версию в `backends/<модель>/Dockerfile`, прежде чем идти дальше.
 
-```bash
-cd ocr-service
-docker compose build
-```
+## Запуск
 
-The build step downloads and caches the PP-OCRv5 mobile models inside the image layer so the **first request is instant** (no runtime download).
-
-### 2. Start the service
-
-```bash
-docker compose up -d
-```
-
-The service is available at **http://localhost:6666**.
-
-### 3. Stop the service
+### 0. Smoke-тест железа (делать первым, на сервере с GPU)
 
 ```bash
-docker compose down
+nvidia-smi                                  # CUDA >= 12.8, видна RTX 5060
+docker compose --profile backend build deepseek-ocr
+docker compose --profile backend up deepseek-ocr     # дождаться загрузки модели
+curl -f http://localhost:8001/health                 # ожидаем 200
+# ручной запрос к бэкенду (картинку base64 подставить) — см. vLLM OpenAI API
+docker compose stop deepseek-ocr
 ```
 
----
+Повторить для `hunyuan-ocr` (:8002) и `qwen3-vl-8b` (:8003) — **по очереди**, в 16 ГБ
+одновременно влезает одна модель.
 
-## Verifying GPU access inside Docker
+### 1. Сборка
 
 ```bash
-# Check that the container can see the GPU
-docker compose exec ocr-service nvidia-smi
-
-# Or run a one-shot check
-docker run --rm --gpus all nvidia/cuda:12.6.3-cudnn-runtime-ubuntu22.04 nvidia-smi
+docker compose build gateway
+docker compose --profile backend build      # три бэкенда
 ```
 
-You should see your RTX 3050 listed with ~8 GB total memory.
+### 2. Создать (но не запускать) контейнеры бэкендов
 
----
+Гейтвей стартует/гасит бэкенды по имени, поэтому контейнеры должны существовать:
 
-## API reference
+```bash
+docker compose --profile backend up --no-start
+```
+
+### 3. Поднять гейтвей
+
+```bash
+docker compose up -d gateway
+```
+
+### 4. Доступ с локальной машины через SSH-туннель
+
+```bash
+ssh -L 8080:localhost:8080 user@server
+```
+
+Дальше все `curl` — на `http://localhost:8080`.
+
+## API
 
 ### `GET /health`
-
 ```bash
-curl http://localhost:6666/health
-# {"status":"ok"}
+curl http://localhost:8080/health           # {"status":"ok"}
 ```
 
-### `POST /ocr/image/structured` — single image with layout and tables
-
-Accepts: `png`, `jpg`, `jpeg`, `webp`, `bmp`
-
+### `GET /models`
 ```bash
-curl -X POST "http://localhost:6666/ocr/image/structured" \
-     -F "file=@page.png"
+curl http://localhost:8080/models            # список моделей + какая сейчас активна
 ```
 
-Run on CPU instead of GPU:
-
+### `POST /ocr`
 ```bash
-curl -X POST "http://localhost:6666/ocr/image/structured" \
-     -F "file=@page.png" \
-     -F "device=cpu"
+# одна модель
+curl -X POST http://localhost:8080/ocr \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-ocr","path":"sample_ru.png"}'
+
+# все модели по очереди (load/swap между ними)
+curl -X POST http://localhost:8080/ocr \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"all","path":"sample_ru.png"}'
 ```
 
-Allowed `device` values: `cpu`, `gpu:0`, `gpu:1`, … (any non-negative GPU index). If `device` is omitted, the service uses `OCR_DEVICE` from the environment.
-
-Response:
+Ответ:
 ```json
 {
-  "filename": "page.png",
-  "blocks": [
-    {
-      "type": "text",
-      "text": "Распознанный текст...",
-      "table": null
-    },
-    {
-      "type": "table",
-      "text": "Колонка 1  Колонка 2\nЗначение 1  Значение 2",
-      "table": {
-        "rows": [
-          {"cells": [{"content": "Колонка 1"}, {"content": "Колонка 2"}]},
-          {"cells": [{"content": "Значение 1"}, {"content": "Значение 2"}]}
-        ],
-        "markdown": "| Колонка 1 | Колонка 2 |\n| --- | --- |\n| Значение 1 | Значение 2 |",
-        "html": "<table>...</table>"
-      }
-    }
-  ],
-  "text": "Распознанный текст...",
-  "markdown": "Распознанный текст...\n\n| Колонка 1 | Колонка 2 |\n| --- | --- |\n| Значение 1 | Значение 2 |",
-  "engine": "ppstructurev3",
-  "language": "ru"
+  "input": "sample_ru.png",
+  "results": [
+    { "model": "deepseek-ocr", "status": "ok",
+      "output_path": "output/deepseek-ocr/sample_ru.md",
+      "chars": 1234, "pages": 1, "elapsed_s": 8.1 }
+  ]
 }
 ```
 
-### `POST /ocr/document/structured` — PDF document with layout and tables
+Поля запроса:
 
-```bash
-curl -X POST "http://localhost:6666/ocr/document/structured" \
-     -F "file=@document.pdf"
-```
+| Поле | Тип | По умолч. | Описание |
+|---|---|---|---|
+| `model` | str | — | имя модели из `/models` или `"all"` |
+| `path` | str | — | путь к файлу относительно `./data` |
+| `keep_loaded` | bool | `true` | не гасить бэкенд после запроса (быстрее повторные вызовы) |
 
-Run PDF OCR on CPU:
+Результат каждой модели лежит в `./output/<модель>/<имя>.md`.
 
-```bash
-curl -X POST "http://localhost:6666/ocr/document/structured" \
-     -F "file=@document.pdf" \
-     -F "device=cpu"
-```
+## Переменные окружения (гейтвей)
 
-Response:
-```json
-{
-  "filename": "document.pdf",
-  "pages": [
-    {"page": 1, "blocks": [...], "text": "...", "markdown": "..."},
-    {"page": 2, "blocks": [...], "text": "...", "markdown": "..."}
-  ],
-  "full_text": "Объединённый текст всех страниц...",
-  "full_markdown": "Markdown всех страниц..."
-}
-```
-
----
-
-## Quick curl examples
-
-```bash
-# Structured image
-curl -X POST "http://localhost:6666/ocr/image/structured" -F "file=@page.png"
-
-# Structured image on CPU
-curl -X POST "http://localhost:6666/ocr/image/structured" -F "file=@page.png" -F "device=cpu"
-
-# Structured PDF
-curl -X POST "http://localhost:6666/ocr/document/structured" -F "file=@document.pdf"
-
-# Structured PDF on a specific GPU
-curl -X POST "http://localhost:6666/ocr/document/structured" -F "file=@document.pdf" -F "device=gpu:0"
-```
-
----
-
-## Environment variables
-
-| Variable | Default | Description |
+| Переменная | Default | Описание |
 |---|---|---|
-| `OCR_LANG` | `ru` | OCR language |
-| `OCR_DEVICE` | `gpu:0` | PaddlePaddle device string |
-| `MAX_UPLOAD_MB` | `50` | Maximum upload size in megabytes |
-| `PDF_DPI` | `200` | Resolution for PDF → image rendering (higher = better quality, more RAM) |
-| `MAX_PDF_PAGES` | `100` | Maximum number of pages accepted per PDF upload |
-| `PADDLE_PDX_MODEL_SOURCE` | `BOS` | Model download source (`BOS` = official bucket) |
+| `DATA_DIR` | `/data` | папка входных файлов внутри контейнера |
+| `OUTPUT_DIR` | `/output` | папка для `.md` |
+| `DOCKER_NETWORK` | `ocr-net` | docker-сеть гейтвея и бэкендов |
+| `BACKEND_READY_TIMEOUT_S` | `900` | сколько ждать готовности бэкенда (первый старт = скачивание весов) |
+| `OCR_REQUEST_TIMEOUT_S` | `600` | таймаут генерации на запрос |
+| `PDF_DPI` | `200` | разрешение рендера PDF |
+| `MAX_PDF_PAGES` | `100` | лимит страниц PDF |
 
-All variables can be overridden in `docker-compose.yml` under `environment:` or via a `.env` file placed next to `docker-compose.yml`.
+## Добавить модель
+
+1. Создать `backends/<имя>/Dockerfile` (база `vllm/vllm-openai:nightly`, свой `vllm serve ...`).
+2. Добавить сервис в `docker-compose.yml` (profile `backend`, GPU, том `hf-cache`, свой порт).
+3. Добавить `ModelSpec` в `gateway/app/registry.py` (имя, контейнер, сервис, порт, `model_id`, промпт).

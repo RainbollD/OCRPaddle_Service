@@ -1,0 +1,112 @@
+services:
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: ocr-gateway:latest
+    container_name: ocr-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      DATA_DIR: /data
+      OUTPUT_DIR: /output
+      DOCKER_NETWORK: ocr-net
+    volumes:
+      - ./data:/data:ro          # input files (server-side paths)
+      - ./output:/output         # written .md files
+      - /var/run/docker.sock:/var/run/docker.sock   # control backend containers
+    networks:
+      - ocr-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # --- GPU backends -------------------------------------------------------
+  # Profile "backend" keeps these from auto-starting; the gateway starts the
+  # requested one on demand (only one fits in 16 GB at a time). Create them
+  # once with:  docker compose --profile backend up --no-start
+  deepseek-ocr:
+    build:
+      context: ./backends/deepseek-ocr
+      dockerfile: Dockerfile
+    image: ocr-backend-deepseek:latest
+    container_name: ocr-deepseek
+    profiles: ["backend"]
+    ports:
+      - "8001:8001"              # exposed for the hardware smoke test (Verification step 0)
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    networks:
+      - ocr-net
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  hunyuan-ocr:
+    build:
+      context: ./backends/hunyuan-ocr
+      dockerfile: Dockerfile
+    image: ocr-backend-hunyuan:latest
+    container_name: ocr-hunyuan
+    profiles: ["backend"]
+    ports:
+      - "8002:8002"
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    networks:
+      - ocr-net
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  qwen3-vl-8b:
+    build:
+      context: ./backends/qwen3-vl-8b
+      dockerfile: Dockerfile
+    image: ocr-backend-qwen3-vl-8b:latest
+    container_name: ocr-qwen3-vl-8b
+    profiles: ["backend"]
+    ports:
+      - "8003:8003"
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    networks:
+      - ocr-net
+    ipc: host
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+networks:
+  ocr-net:
+    name: ocr-net
+
+volumes:
+  hf-cache:

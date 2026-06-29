@@ -33,6 +33,12 @@ htmlcov/
 test_png/
 working_preproccessing_pictures
 
+# Input/output mounts (keep the dirs, ignore contents)
+/data/*
+!/data/.gitkeep
+/output/*
+!/output/.gitkeep
+
 # OS
 .DS_Store
 Thumbs.db
