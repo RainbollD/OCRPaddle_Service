@@ -1,0 +1,40 @@
+# HunyuanOCR backend — standalone. Start from this folder:
+#   cd backends/hunyuan-ocr && docker compose up
+# API: http://localhost:8002  (CLI: python client/cli.py hunyuan-ocr data/scan.pdf)
+#
+# Only one backend fits in 16 GB VRAM — stop this one before starting another.
+# The hf-cache volume has a fixed name, so all three backends share downloaded weights.
+services:
+  hunyuan-ocr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ocr-backend-hunyuan:latest
+    container_name: ocr-hunyuan
+    ports:
+      - "8002:8002"
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ipc: host
+    # `docker ps` shows (health: starting) while the model loads, then (healthy)
+    # once /health returns 200. start_period covers weight download + graph compile.
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:
+    name: ocr-hf-cache

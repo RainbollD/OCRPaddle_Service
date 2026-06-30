@@ -60,6 +60,19 @@ def main() -> int:
     t0 = time.perf_counter()
     try:
         with httpx.Client(timeout=args.timeout) as client:
+            try:
+                health = client.get(f"{url}/health", timeout=5.0)
+                ready = health.status_code == 200
+            except httpx.HTTPError:
+                ready = False
+            if ready:
+                print("backend: ready (/health 200)", flush=True)
+            else:
+                print(
+                    "backend: not ready yet — model is still loading; "
+                    "waiting (check `docker compose logs -f`) ...",
+                    flush=True,
+                )
             markdown = ocr_pages(client, url, spec, images)
     except httpx.ConnectError:
         print(

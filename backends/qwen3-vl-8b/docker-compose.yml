@@ -1,0 +1,40 @@
+# Qwen3-VL-8B backend — standalone. Start from this folder:
+#   cd backends/qwen3-vl-8b && docker compose up
+# API: http://localhost:8003  (CLI: python client/cli.py qwen3-vl-8b data/scan.pdf)
+#
+# Only one backend fits in 16 GB VRAM — stop this one before starting another.
+# The hf-cache volume has a fixed name, so all three backends share downloaded weights.
+services:
+  qwen3-vl-8b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ocr-backend-qwen3-vl-8b:latest
+    container_name: ocr-qwen3-vl-8b
+    ports:
+      - "8003:8003"
+    environment:
+      HF_HOME: /root/.cache/huggingface
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    ipc: host
+    # `docker ps` shows (health: starting) while the model loads, then (healthy)
+    # once /health returns 200. start_period covers weight download + graph compile.
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8003/health')\" || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:
+    name: ocr-hf-cache

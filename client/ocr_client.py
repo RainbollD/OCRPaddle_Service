@@ -1,5 +1,6 @@
 import base64
 import mimetypes
+import time
 from pathlib import Path
 
 import httpx
@@ -61,8 +62,12 @@ def ocr_pages(
     Multiple pages are separated by a ``---`` rule.
     """
     parts: list[str] = []
+    total = len(images)
     for idx, image in enumerate(images, start=1):
-        if len(images) > 1:
-            print(f"  page {idx}/{len(images)} ...", flush=True)
-        parts.append(ocr_image(client, url, spec, image))
+        print(f"  page {idx}/{total}: sending ...", flush=True)
+        t0 = time.perf_counter()
+        text = ocr_image(client, url, spec, image)
+        dt = time.perf_counter() - t0
+        print(f"  page {idx}/{total}: done ({len(text)} chars, {dt:.1f}s)", flush=True)
+        parts.append(text)
     return "\n\n---\n\n".join(parts)

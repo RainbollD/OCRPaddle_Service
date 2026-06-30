@@ -31,28 +31,33 @@
 
 ## Запуск
 
-### 1. Собрать образы (один раз)
+Каждый бэкенд — самодостаточный `docker compose` в своей папке `backends/<модель>/`.
+Все три делят один том весов `ocr-hf-cache`, так что модель качается один раз.
+Полная инструкция по каждой модели — в её папке:
+[deepseek-ocr](backends/deepseek-ocr/README.md) · [hunyuan-ocr](backends/hunyuan-ocr/README.md) · [qwen3-vl-8b](backends/qwen3-vl-8b/README.md).
+
+### 1. Поднять ОДНУ модель
 
 ```bash
-docker compose build
+cd backends/deepseek-ocr        # или hunyuan-ocr / qwen3-vl-8b
+docker compose up               # соберёт образ при первом запуске
 ```
 
-### 2. Поднять ОДНУ модель
+Понять, что бэкенд жив:
 
 ```bash
-docker compose up deepseek-ocr        # или hunyuan-ocr / qwen3-vl-8b
+docker compose logs -f                  # живой лог загрузки модели и запросов
+docker compose ps                       # STATUS: (health: starting) -> (healthy)
+curl -f http://localhost:8001/health    # 200 = модель готова
 ```
 
-Дождись в логах `Application startup complete` / `Uvicorn running on …:8001`. Проверка:
-
-```bash
-curl -f http://localhost:8001/health   # 200 = модель готова
-```
+Бэкенд готов, когда в логах есть `Application startup complete` / `Uvicorn running on …:8001`,
+а `docker compose ps` показывает `(healthy)`.
 
 > Первый старт качает веса и компилирует граф (`VLLM_COMPILE` + capture CUDA graphs) — это пара
-> минут. Дальше старты быстрые из тома `hf-cache`.
+> минут. Дальше старты быстрые из общего тома `ocr-hf-cache`.
 
-### 3. Прогнать файл через CLI
+### 2. Прогнать файл через CLI
 
 ```bash
 pip install -r requirements.txt        # один раз
@@ -61,13 +66,13 @@ python client/cli.py deepseek-ocr data/scan.pdf
 # -> output/deepseek-ocr/scan.md
 ```
 
-### 4. Сравнить с другой моделью
+### 3. Сравнить с другой моделью
 
-Останови текущий контейнер и подними следующий (в 16 ГБ две сразу не влезут):
+Останови текущий контейнер и подними следующий из его папки (в 16 ГБ две сразу не влезут):
 
 ```bash
-docker compose stop deepseek-ocr
-docker compose up hunyuan-ocr
+cd ../deepseek-ocr && docker compose down   # остановить текущую
+cd ../hunyuan-ocr  && docker compose up      # поднять следующую
 python client/cli.py hunyuan-ocr data/scan.pdf
 # -> output/hunyuan-ocr/scan.md
 ```
@@ -114,5 +119,5 @@ curl -s http://localhost:8001/v1/chat/completions -H 'Content-Type: application/
 ## Добавить модель
 
 1. `backends/<имя>/Dockerfile` (база `vllm/vllm-openai:nightly`, свой `vllm serve … --port <порт>`).
-2. Сервис в `docker-compose.yml` (GPU, том `hf-cache`, проброс порта).
+2. `backends/<имя>/docker-compose.yml` (GPU, общий том `ocr-hf-cache` через `name:`, проброс порта).
 3. `ModelSpec` в `client/registry.py` (имя, порт, `model_id`, промпт).
